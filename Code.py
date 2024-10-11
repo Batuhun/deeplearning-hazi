@@ -9,6 +9,11 @@ Original file is located at
 # Install torch and download the dataset
 """
 
+
+
+"""# Install torch and download the dataset"""
+
+import os
 import torch
 import os
 import urllib.request
@@ -20,6 +25,29 @@ dataset_path = "facebook_combined.txt.gz"
 if not os.path.exists(dataset_path):
     urllib.request.urlretrieve(url, dataset_path)
     print("Facebook dataset downloaded.")
+
+import os
+import torch
+import urllib.request
+
+# Step 1: Download the Facebook Ego dataset
+full_url = "https://snap.stanford.edu/data/facebook.tar.gz"
+full_dataset_path = "facebook.tar.gz"
+
+if not os.path.exists(full_dataset_path):
+    urllib.request.urlretrieve(full_url, full_dataset_path)
+    print("Facebook dataset downloaded.")
+
+import zipfile
+import gzip
+import pandas as pd
+
+lines = []
+with gzip.open(full_dataset_path, 'rt') as f:
+    for line in f:
+        line = line.strip(' ')
+        lines.append(line)
+pd.DataFrame(lines).head()
 
 """
 # Data analysis"""
@@ -78,6 +106,7 @@ import seaborn as sns
 # %matplotlib inline
 sns.set_style('ticks')
 fig, ax = plt.subplots()
+fig.set_size_inches(11.7, 8.27)
 sns.histplot(degree_dist, color='#16A085')
 plt.xlabel('PDF of Degree')
 sns.despine()
@@ -94,39 +123,29 @@ with gzip.open(dataset_path, 'rt') as f:
     for line in f:
         src, dst = map(int, line.strip().split())
         edges.append([src, dst])
-edges_list = edges
-from collections import Counter
-degrees = Counter([edge[0] for edge in edges_list] + [edge[1] for edge in edges_list])
 
 edges_list = edges
 print(len(edges_list))
 edges_list = [edge for edge in edges_list if edge[0] != edge[1]]
 edges_list = list(set([tuple(sorted(edge)) for edge in edges_list]))
-# remove nodes (and their edges) that have a degree below 2
+#remove nodes (and their edges) that have a degree below 2
+from collections import Counter
+degrees = Counter([edge[0] for edge in edges_list] + [edge[1] for edge in edges_list])
 edges_list = [edge for edge in edges_list if degrees[edge[0]] > 1 and degrees[edge[1]] > 1]
 print(len(edges_list))
-# remove top 1% of nodes with highest degrees
-high_degree_threshold = 0.99
+high_degree_threshold = 0.99  # remove top 1% of nodes with highest degrees
 threshold = np.percentile(list(degrees.values()), 99)
 edges_list = [edge for edge in edges_list if degrees[edge[0]] < threshold and degrees[edge[1]] < threshold]
 print(len(edges_list))
 
-"""# Creating and training the model"""
+"""# Data preprocessing, Creating and training the model"""
 
-import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv, global_mean_pool  # Global pooling
 from sklearn.model_selection import train_test_split
 from torch_geometric.nn import BatchNorm
 from node2vec import Node2Vec
-from sklearn.model_selection import train_test_split
-
-import torch
-
-# Check if GPU is available and set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 
 edges_copy = edges_list
 torch_edges = torch.tensor(edges_copy, dtype=torch.long).t().contiguous()
@@ -157,12 +176,12 @@ x = torch.cat([x, diameter_tensor], dim=1)
 
 
 # Initialize the Node2Vec model
-node2vec = Node2Vec(graph, dimensions=64, walk_length=30, num_walks=200, workers=1)
+node2vec = Node2Vec(graph, dimensions=64, walk_length=30, num_walks=200)
 
 # Fit the model to generate embeddings
 model = node2vec.fit(window=5, min_count=1)
-#print(len(model.wv))  # Should match the number of nodes in the graph
-#print(num_nodes)      # Should also match the number of nodes in the graph
+print(len(model.wv))  # Should match the number of nodes in the graph
+print(num_nodes)      # Should also match the number of nodes in the graph
 # Get embeddings for all nodes
 embeddings = [model.wv[str(node)] for node in range(num_nodes)]
 
@@ -177,64 +196,54 @@ data = Data(x=x, edge_index=torch_edges)
 
 print(f"Node features based on degree: {data.x[:5]}")
 
-# Step 5: Create labels for friend recommendation
-# Positive samples (existing edges)
-positive_edges = torch.tensor(edges_copy, dtype=torch.long).t().contiguous()
-
-# Generate negative samples
-num_nodes = torch_edges.max().item() + 1
-negative_edges = []
-while len(negative_edges) < len(positive_edges[0]) // 2:  # Half the size of positive edges
-    src = torch.randint(0, num_nodes, (1,)).item()
-    dst = torch.randint(0, num_nodes, (1,)).item()
-    if src != dst and (src, dst) not in edges_list and (dst, src) not in edges_list:
-        negative_edges.append([src, dst])
-
-# Combine positive and negative edges
-all_edges = torch.cat([positive_edges, torch.tensor(negative_edges, dtype=torch.long).t()], dim=1)
-all_labels = torch.cat([torch.ones(positive_edges.size(1)), torch.zeros(len(negative_edges))])  # Labels for edges
-
-train_edges, test_edges, train_labels, test_labels = train_test_split(all_edges.t(), all_labels, test_size=0.2, random_state=42)
-
-# Create Data objects for training and testing
-train_data = Data(x=x, edge_index=train_edges.t().contiguous(), y=train_labels)
-test_data = Data(x=x, edge_index=test_edges.t().contiguous(), y=test_labels)
-
-# Step 6: Create DataLoader for edge classification
-from torch_geometric.data import DataLoader
-
-# Define a modified GCN model for edge classification
-class GCNEdgeClassification(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, dropout=0.25):
-        super(GCNEdgeClassification, self).__init__()
+# Step 4: Define a simple GCN model
+class GCN(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, dropout=0.5):
+        super(GCN, self).__init__()
+        # First layer: from in_channels to hidden_channels
         self.conv1 = GCNConv(in_channels, hidden_channels)
+        # Second layer: from hidden_channels to hidden_channels
         self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        # Third layer: from hidden_channels to out_channels (final output)
         self.conv3 = GCNConv(hidden_channels, hidden_channels)
-        self.conv4 = GCNConv(hidden_channels, hidden_channels)
-        self.fc = torch.nn.Linear(hidden_channels, 2)
+        self.batch_norm1 = BatchNorm(hidden_channels)
+        self.batch_norm2 = BatchNorm(hidden_channels)
+        # Fully connected layers
+        self.fc = torch.nn.Linear(hidden_channels, out_channels)
         self.dropout = dropout
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
+        # First layer
         x = self.conv1(x, edge_index)
         x = F.relu(x)
+        x = self.batch_norm1(x)  # Batch normalization
         x = F.dropout(x, p=self.dropout, training=self.training)
+        # Second layer
         x = self.conv2(x, edge_index)
         x = F.relu(x)
+        x = self.batch_norm2(x)  # Batch normalization
         x = F.dropout(x, p=self.dropout, training=self.training)
+        # Third (final) layer
         x = self.conv3(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.conv4(x, edge_index)
-        x = F.relu(x)
 
-        # Implement edge-based classification
-        edge_embeddings = x[edge_index[0]] + x[edge_index[1]]  # Combine source and target node embeddings
-        x = self.fc(edge_embeddings)
-        return F.log_softmax(x, dim=1)  # Adjust for edge-based output
+        # Global pooling (for graph-level representation)
+        #x = global_mean_pool(x, batch)  # Pooling over all nodes in the graph
 
-# Initialize the model and optimizer
-model = GCNEdgeClassification(in_channels=x.size(1), hidden_channels=128, dropout=0.5)
+        # Pass through the fully connected layer
+        x = self.fc(x)
+
+        return F.log_softmax(x, dim=1)  # Final classification
+
+# Step 5: Create a simple task - Node Classification (Dummy labels)
+# For simplicity, let's create some random labels to train the model.
+# In a real-world case, you would have actual node labels.
+
+labels = torch.randint(0, 2, (num_nodes,))
+train_mask, test_mask = train_test_split(torch.arange(num_nodes), test_size=0.2)
+
+# Step 6: Initialize the model and optimizer
+model = GCN(in_channels=x.size(1), hidden_channels=16, out_channels=2, dropout=0.5)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
 # Training loop adapted for edge classification
@@ -255,9 +264,9 @@ def test_edge_classification():
         acc = int(correct) / test_data.y.size(0)
         return acc
 
-# Training the model for friend recommendation
-for epoch in range(1, 2401):
-    loss = train_edge_classification()
+# Training the model
+for epoch in range(1, 1201):
+    loss = train()
     if epoch % 20 == 0:
         acc = test_edge_classification()
         print(f'Epoch {epoch}, Loss: {loss:.4f}, Test Accuracy: {acc:.4f}')
