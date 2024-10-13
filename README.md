@@ -1,8 +1,9 @@
 # deeplearning-hazi
-## Team name:
+## Team name: Programozók (not 100% sure)
 
 ## Team members' names and Neptun codes:
 Tóth Fábián Tamás (D4ZXEU), 
+Galacz Barnabás (D133RO)
 ## Project description
 ### Friend recommendation with graph neural networks
 The goal of this project is to develop a personalized friend recommendation system by using Graph Neural Networks (GNNs). You have to analyze data from Facebook, Google+, or Twitter to suggest meaningful connections based on user profiles and interactions. This project offers a hands-on opportunity to deepen your deep learning and network analysis skills. 
@@ -27,3 +28,7 @@ The goal of this project is to develop a personalized friend recommendation syst
 - https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.GCNConv.html
 
 ## How to run it (building and running the container, running your solution within the container)
+-Put dockerfile and Code.py in the same folder
+-Build docker image with: docker build -t my_gnn_project:latest .
+-Run docker image with: docker run --gpus all -it my_gnn_project
+(it will build the enviroment and run the code automatically)
