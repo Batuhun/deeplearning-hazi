@@ -8,7 +8,7 @@ WORKDIR /app
 COPY Code.py .
 
 # Install any additional Python packages required
-RUN pip install --no-cache-dir networkx seaborn node2vec pandas
+RUN pip install --no-cache-dir networkx seaborn node2vec pandas optuna
 
 # Set the default command to run your script
 CMD ["python3", "Code.py"]
