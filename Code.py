@@ -9,6 +9,7 @@ Original file is located at
 # Install torch
 """
 
+
 import torch
 import os
 import urllib.request
@@ -101,7 +102,7 @@ plt.show()
 
 """# Data preprocessing"""
 
-# Step 2: Preprocess the data - Create edge list
+# Preprocess the data - Create edge list
 
 edges = []
 with gzip.open(dataset_path, 'rt') as f:
@@ -124,6 +125,71 @@ high_degree_threshold = 0.99
 threshold = np.percentile(list(degrees.values()), 99)
 edges_list = [edge for edge in edges_list if degrees[edge[0]] < threshold and degrees[edge[1]] < threshold]
 print(len(edges_list))
+
+"""#Baseline"""
+
+import networkx as nx
+import numpy as np
+from sklearn.metrics import accuracy_score, roc_auc_score
+
+# Step 1: Build the Graph from the Edge List
+def build_graph(edge_list):
+    G = nx.Graph()
+    G.add_edges_from(edge_list)
+    return G
+
+# Load preprocessed edge list and build the graph
+G = build_graph(edges_list)
+
+# Step 2: Split Edges into Train and Test Sets
+np.random.seed(42)
+edges = np.array(edges_list)
+np.random.shuffle(edges)
+
+train_size = int(0.8 * len(edges))  # 80% train, 20% test
+train_edges = edges[:train_size]
+test_edges = edges[train_size:]
+
+# Non-existent edges to use as negative samples in the test set
+all_possible_edges = set(nx.non_edges(G))
+negative_samples = np.array(list(all_possible_edges))[:len(test_edges)]
+
+# Step 3: Calculate Jaccard Similarity Scores
+def calculate_jaccard_scores(edges, G):
+    scores = []
+    for src, dst in edges:
+        if G.has_node(src) and G.has_node(dst):
+            jaccard_score = list(nx.jaccard_coefficient(G, [(src, dst)]))
+            if jaccard_score:
+                score = jaccard_score[0][2]
+            else:
+                score = 0
+        else:
+            score = 0
+        scores.append(score)
+    return np.array(scores)
+
+# Calculate similarity scores for positive (test edges) and negative samples
+positive_scores = calculate_jaccard_scores(test_edges, G)
+negative_scores = calculate_jaccard_scores(negative_samples, G)
+
+# Step 4: Evaluate the Baseline Model
+# Concatenate scores and create labels for evaluation
+all_scores = np.concatenate([positive_scores, negative_scores])
+labels = np.concatenate([np.ones(len(positive_scores)), np.zeros(len(negative_scores))])
+
+# Set a threshold to classify edges as "connected" or "not connected"
+threshold = 0.5  # Adjust as needed
+predictions = (all_scores >= threshold).astype(int)
+
+# Calculate evaluation metrics
+accuracy = accuracy_score(labels, predictions)
+auc = roc_auc_score(labels, all_scores)
+
+# Print results
+print(f"Baseline Model - Jaccard Similarity")
+print(f"Accuracy: {accuracy:.4f}")
+print(f"AUC: {auc:.4f}")
 
 """# Adding extra features to the nodes"""
 
@@ -183,7 +249,7 @@ print(f"Node features based on degree: {data.x[:5]}")
 
 """
 
-# Step 5: Create labels for friend recommendation
+# Create labels for friend recommendation
 # Positive samples (existing edges)
 positive_edges = torch.tensor(edges_copy, dtype=torch.long).t().contiguous()
 
@@ -196,10 +262,10 @@ while len(negative_edges) < len(positive_edges[0]) // 2:  # Half the size of pos
     if src != dst and (src, dst) not in edges_list and (dst, src) not in edges_list:
         negative_edges.append([src, dst])
 
+# Split into train and combined test/validation set
 all_edges = torch.cat([positive_edges, torch.tensor(negative_edges, dtype=torch.long).t()], dim=1)
 all_labels = torch.cat([torch.ones(positive_edges.size(1)), torch.zeros(len(negative_edges))])  # Labels for edges
 
-# Step 1: Split into train and combined test/validation set
 train_edges, test_val_edges, train_labels, test_val_labels = train_test_split(
     all_edges.t(), all_labels, test_size=0.2, random_state=42
 )
@@ -207,7 +273,7 @@ train_edges, test_val_edges, train_labels, test_val_labels = train_test_split(
 # Create Data object for the training set
 train_data = Data(x=x, edge_index=train_edges.t().contiguous(), y=train_labels)
 
-# Step 2: Split the combined test/validation set into test and validation sets
+# Split the combined test/validation set into test and validation sets
 val_edges, test_edges, val_labels, test_labels = train_test_split(
     test_val_edges, test_val_labels, test_size=0.5, random_state=42
 )
@@ -218,40 +284,90 @@ test_data = Data(x=x, edge_index=test_edges.t().contiguous(), y=test_labels)
 
 """#Training and testing"""
 
+import wandb
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.data import Data
+from torch.nn import BatchNorm1d
+from sklearn.metrics import accuracy_score, roc_auc_score
+import torch
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, GATConv, SAGEConv, BatchNorm, global_mean_pool
+from torch.nn import Linear, BatchNorm1d
 
 class GCNEdgePrediction(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, dropout=0.25):
+    def __init__(self, in_channels, hidden_channels, num_layers=3, dropout=0.25):
         super(GCNEdgePrediction, self).__init__()
-        self.conv1 = GCNConv(in_channels, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
-        self.fc1 = torch.nn.Linear(2 * hidden_channels, hidden_channels)  # For concatenation
-        self.fc2 = torch.nn.Linear(hidden_channels, 1)  # Output single score for each edge
+
+        # Feature transformation layer
+        self.pre_transform = Linear(in_channels, hidden_channels)
+
+        # Define GCN layers with a mix of GCNConv, GATConv, and SAGEConv
+        self.layers = torch.nn.ModuleList()
+        self.bns = torch.nn.ModuleList()
+
+        # First layer: GCNConv
+        self.layers.append(GCNConv(hidden_channels, hidden_channels))
+        self.bns.append(BatchNorm1d(hidden_channels))
+
+        # Intermediate layers: Mix of GCNConv, GATConv, and SAGEConv
+        for i in range(1, num_layers - 1):
+            if i % 3 == 0:
+                self.layers.append(GCNConv(hidden_channels, hidden_channels))
+            elif i % 3 == 1:
+                self.layers.append(GATConv(hidden_channels, hidden_channels, heads=4, concat=False))
+            else:
+                self.layers.append(SAGEConv(hidden_channels, hidden_channels))
+            self.bns.append(BatchNorm1d(hidden_channels))
+
+        # Last layer: GCNConv
+        self.layers.append(GCNConv(hidden_channels, hidden_channels))
+        self.bns.append(BatchNorm1d(hidden_channels))
+
+        # Fully connected layers
+        self.fc1 = Linear(2 * hidden_channels, hidden_channels)
+        self.fc2 = Linear(hidden_channels, hidden_channels // 2)
+        self.fc3 = Linear(hidden_channels // 2, hidden_channels // 4)
+        self.fc4 = Linear(hidden_channels // 4, 1)
+
+        # Dropout rate
         self.dropout = dropout
 
     def forward(self, x, edge_index, edge_label_index):
-        # GCN Layers
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.conv2(x, edge_index)
-        x = F.relu(x)
+        # Pre-transform input features
+        x = self.pre_transform(x)
 
-        # Edge Embeddings
-        src, dst = edge_label_index  # Edge indices
-        edge_embeddings = torch.cat([x[src], x[dst]], dim=1)  # Concatenate source and target embeddings
-        edge_scores = self.fc2(F.relu(self.fc1(edge_embeddings)))
+        # GCN Layers with residual connections
+        for layer, bn in zip(self.layers, self.bns):
+            x_residual = x
+            x = layer(x, edge_index)
+            x = bn(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            # Add residual connection if shapes match
+            if x.shape == x_residual.shape:
+                x += x_residual
+
+        # Edge embeddings: combine features for each pair of nodes
+        src, dst = edge_label_index
+        edge_embeddings = torch.cat([x[src], x[dst]], dim=1)
+
+        # Fully connected layers for final prediction
+        x = F.relu(self.fc1(edge_embeddings))
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        edge_scores = self.fc4(x)  # Output score for each edge
+
         return edge_scores
 
-# Initialize the model and optimizer
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # Check and set device
-model = GCNEdgePrediction(in_channels=data.x.size(1), hidden_channels=128, dropout=0.5).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
 
-# Ensure data and labels are on the same device
+# Initialize model and optimizer
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = GCNEdgePrediction(in_channels=data.x.size(1), hidden_channels=128, dropout=0.1097076435322618).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.00011840161483188985)
+
 train_data = train_data.to(device)
 val_data = val_data.to(device)
 test_data = test_data.to(device)
@@ -260,72 +376,71 @@ test_data = test_data.to(device)
 def train():
     model.train()
     optimizer.zero_grad()
-    out = model(train_data.x, train_data.edge_index, train_data.edge_index)  # Use train_data.edge_index
-    loss = F.binary_cross_entropy_with_logits(out, train_data.y.float().unsqueeze(1))  # Ensure correct shape
+    out = model(train_data.x, train_data.edge_index, train_data.edge_index)
+    loss = F.binary_cross_entropy_with_logits(out, train_data.y.float().unsqueeze(1))
     loss.backward()
     optimizer.step()
     return loss.item()
 
-from sklearn.metrics import accuracy_score, roc_auc_score
-
 def test(data):
     model.eval()
     with torch.no_grad():
-        # Get predictions as probabilities
         out = model(data.x, data.edge_index, data.edge_index)
-        probs = torch.sigmoid(out).squeeze()  # Apply sigmoid for binary classification probabilities
-
-        # Classify based on a threshold of 0.5
+        probs = torch.sigmoid(out).squeeze()
         pred_labels = (probs > 0.5).float()
-
-        # Calculate accuracy
         acc = accuracy_score(data.y.cpu(), pred_labels.cpu())
-
-        # Optionally, calculate ROC-AUC for more insight
         auc = roc_auc_score(data.y.cpu(), probs.cpu())
-
         return acc, auc
 
 def validate():
-    # Evaluate on the validation set
-    val_acc, val_auc = test(val_data)  # Reuse the `test` function with `val_data`
+    val_acc, val_auc = test(val_data)
     return val_acc, val_auc
 
+# Initialize W&B
+wandb.init(project="gcn-edge-prediction")
+# Set up W&B configuration and logging
+config = wandb.config
+config.patience = 150
+config.epochs = 2000
 
-
-
-patience = 100  # Early stopping patience
+patience = config.patience
 best_val_auc = 0.0
 epochs_without_improvement = 0
 
-for epoch in range(1, 1001):
-    # Training step
+for epoch in range(1, config.epochs + 1):
     train_loss = train()
-
-    # Validation step to monitor performance
     val_acc, val_auc = validate()
 
-    # Early stopping based on validation AUC
+    # Log metrics to W&B
+    wandb.log({
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_accuracy": val_acc,
+        "val_auc": val_auc,
+    })
+
     if val_auc > best_val_auc:
         best_val_auc = val_auc
         epochs_without_improvement = 0
-        torch.save(model.state_dict(), 'best_model.pth')  # Save the best model based on validation AUC
+        torch.save(model.state_dict(), 'best_model.pth')
     else:
         epochs_without_improvement += 1
 
-    # Stop training if no improvement within patience epochs
     if epochs_without_improvement >= patience:
         print(f"Early stopping at epoch {epoch}, best validation AUC: {best_val_auc:.4f}")
         break
 
-    # Optionally print progress every 20 epochs
     if epoch % 20 == 0:
         print(f"Epoch {epoch}, Train Loss: {train_loss:.4f}, Val Accuracy: {val_acc:.4f}, Val AUC: {val_auc:.4f}")
 
-# Final test evaluation after training completes
-model.load_state_dict(torch.load('best_model.pth'))  # Load the best model based on validation AUC
+# Final test evaluation
+model.load_state_dict(torch.load('best_model.pth'))
 test_acc, test_auc = test(test_data)
 print(f"Final Test Accuracy: {test_acc:.4f}, Test AUC: {test_auc:.4f}")
+
+# Log final test metrics to W&B
+wandb.log({"test_accuracy": test_acc, "test_auc": test_auc})
+wandb.finish()
 
 """#Hyper parameter optimization? tbd"""
 
@@ -335,39 +450,17 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from sklearn.metrics import roc_auc_score
 from torch_geometric.data import DataLoader
+from torch.nn import BatchNorm1d
 
-# Define your model class with adjustable hyperparameters
-class GCNEdgePrediction(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, num_layers, dropout):
-        super(GCNEdgePrediction, self).__init__()
-        self.layers = torch.nn.ModuleList()
-        self.layers.append(GCNConv(in_channels, hidden_channels))
-        for _ in range(num_layers - 1):
-            self.layers.append(GCNConv(hidden_channels, hidden_channels))
-        self.fc1 = torch.nn.Linear(2 * hidden_channels, hidden_channels)
-        self.fc2 = torch.nn.Linear(hidden_channels, 1)
-        self.dropout = dropout
-
-    def forward(self, x, edge_index, edge_label_index):
-        # GCN Layers
-        for layer in self.layers:
-            x = layer(x, edge_index)
-            x = F.relu(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
-
-        # Edge Embeddings
-        src, dst = edge_label_index
-        edge_embeddings = torch.cat([x[src], x[dst]], dim=1)
-        edge_scores = self.fc2(F.relu(self.fc1(edge_embeddings)))
-        return edge_scores
 
 # Objective function for Optuna
 def objective(trial):
     # Suggest hyperparameters to tune
     hidden_channels = trial.suggest_int('hidden_channels', 64, 256)
-    num_layers = trial.suggest_int('num_layers', 2, 4)
-    dropout = trial.suggest_float('dropout', 0.2, 0.5)
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-4, 1e-2)
+    num_layers = trial.suggest_int('num_layers', 1, 16)
+    dropout = trial.suggest_float('dropout', 0.1, 0.5)
+    learning_rate = trial.suggest_loguniform('learning_rate', 1e-6, 1e-1)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
 
     # Initialize the model and optimizer with trial-suggested parameters
     model = GCNEdgePrediction(
@@ -377,7 +470,7 @@ def objective(trial):
         dropout=dropout
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     # Training loop
     for epoch in range(50):  # A small number of epochs to save time
@@ -394,11 +487,70 @@ def objective(trial):
 
 # Running Optuna optimization
 study = optuna.create_study(direction='maximize')
-study.optimize(objective, n_trials=50)
+study.optimize(objective, n_trials=250)
 
 # Best trial results
 print("Best trial:")
 trial = study.best_trial
 print(f"  AUC: {trial.value}")
 print("  Best hyperparameters:", trial.params)
+
+best_trial = study.best_trial
+best_params = best_trial.params
+model = GCNEdgePrediction(
+    in_channels=data.x.size(1),
+    hidden_channels=best_params['hidden_channels'],
+    num_layers=best_params['num_layers'],
+    dropout=best_params['dropout']
+).to(device)
+# Initialize model and optimizer
+optimizer = torch.optim.Adam(model.parameters(), lr=best_params['learning_rate'])
+
+# Initialize W&B
+wandb.init(project="gcn-edge-prediction")
+# Set up W&B configuration and logging
+config = wandb.config
+config.patience = 150
+config.epochs = 2000
+
+patience = config.patience
+best_val_auc = 0.0
+epochs_without_improvement = 0
+
+for epoch in range(1, config.epochs + 1):
+    train_loss = train()
+    val_acc, val_auc = validate()
+
+    # Log metrics to W&B
+    wandb.log({
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_accuracy": val_acc,
+        "val_auc": val_auc,
+    })
+
+    if val_auc > best_val_auc:
+        best_val_auc = val_auc
+        epochs_without_improvement = 0
+        torch.save(model.state_dict(), 'best_model.pth')
+    else:
+        epochs_without_improvement += 1
+
+    if epochs_without_improvement >= patience:
+        print(f"Early stopping at epoch {epoch}, best validation AUC: {best_val_auc:.4f}")
+        break
+
+    if epoch % 20 == 0:
+        print(f"Epoch {epoch}, Train Loss: {train_loss:.4f}, Val Accuracy: {val_acc:.4f}, Val AUC: {val_auc:.4f}")
+
+# Final test evaluation
+model.load_state_dict(torch.load('best_model.pth'))
+test_acc, test_auc = test(test_data)
+print(f"Final Test Accuracy: {test_acc:.4f}, Test AUC: {test_auc:.4f}")
+
+# Log final test metrics to W&B
+wandb.log({"test_accuracy": test_acc, "test_auc": test_auc})
+wandb.finish()
+
+"""# Install packages from requirements.txt or export them to requirements.txt"""
 
