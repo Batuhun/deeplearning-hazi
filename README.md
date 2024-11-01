@@ -32,4 +32,4 @@ The goal of this project is to develop a personalized friend recommendation syst
 - Put dockerfile and Code.py in the same folder
 - Build docker image with: `docker build -t my_gnn_project:latest .`
 - Run docker image with: `docker run --gpus all -it my_gnn_project`
-(it will build the enviroment and run the code automatically)
+(it will build the enviroment and run the entire pipeline automatically)
