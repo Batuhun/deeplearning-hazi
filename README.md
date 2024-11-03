@@ -33,3 +33,11 @@ The goal of this project is to develop a personalized friend recommendation syst
 - Build docker image with: `docker build -t my_gnn_project:latest .`
 - Run docker image with: `docker run --gpus all -it my_gnn_project`
 (it will build the enviroment and run the entire pipeline automatically)
+
+## How to run the pipeline, how to train the models, how to evaluate the models
+#### Option 1:
+- Use the commands from the "How to run it" section.
+
+#### Option 2:
+- Run the cells in `Code.ipnyb` either locally or by uploading to Google Colab. For the baseline model run the: `Baseline` cell and the previous cells. For the best model run the `Training and testing` cell and all previous cells
+
