@@ -29,7 +29,7 @@ The goal of this project is to develop a personalized friend recommendation syst
 - https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.nn.conv.GCNConv.html
 
 ## How to run it (building and running the container, running your solution within the container)
-- Put dockerfile and Code.py in the same folder
+#### Run these in the root folder
 - Build docker image with: `docker build -t my_gnn_project:latest .`
 - Run docker image with: `docker run --gpus all -it my_gnn_project`
 (it will build the enviroment and run the entire pipeline automatically)
@@ -39,5 +39,12 @@ The goal of this project is to develop a personalized friend recommendation syst
 - Use the commands from the "How to run it" section.
 
 #### Option 2:
-- Run the cells in `Code.ipnyb` either locally or by uploading to Google Colab. For the baseline model run the: `Baseline` cell and the previous cells. For the best model run the `Training and testing` cell and all previous cells
+- Run the cells in `Code.ipnyb` either locally or by uploading to Google Colab. For the baseline model run the: `Baseline` cell and the previous cells. For the best model run the `Training and testing` cell and all previous cells.
+
+## How to run the UI only
+- `cd UI`
+- `docker build -t gcn-gradio-app .`
+- `docker run -p 7860:7860 --name gcn-gradio-container gcn-gradio-app`
+- Check http://localhost:7860/
+
 
